@@ -1,16 +1,13 @@
 [[mapping-root-object-type]]
 === Root Object Type
 
-The root object mapping is an
-<<mapping-object-type,object type mapping>> that
-maps the root object (the type itself). On top of all the different
-mappings that can be set using the
-<<mapping-object-type,object type mapping>>, it
-allows for additional, type level mapping definitions.
+The root object mapping is an <<mapping-object-type,object type mapping>> that
+maps the root object (the type itself). It supports all of the different
+mappings that can be set using the <<mapping-object-type,object type mapping>>.
 
-The root object mapping allows to index a JSON document that either
-starts with the actual mapping type, or only contains its fields. For
-example, the following `tweet` JSON can be indexed:
+The root object mapping allows to index a JSON document that only contains its
+fields. For example, the following `tweet` JSON can be indexed without
+specifying the `tweet` type in the document itself:
 
 [source,js]
 --------------------------------------------------
@@ -18,20 +15,6 @@ example, the following `tweet` JSON can be indexed:
     "message" : "This is a tweet!"
 }
 --------------------------------------------------
-
-But, also the following JSON can be indexed:
-
-[source,js]
---------------------------------------------------
-{
-    "tweet" : {
-        "message" : "This is a tweet!"
-    }
-}
---------------------------------------------------
-
-Out of the two, it is preferable to use the document *without* the type
-explicitly set.
 
 [float]
 ==== Index / Search Analyzers
@@ -130,6 +113,11 @@ can be set to `true`. For example:
 
 Dynamic templates allow to define mapping templates that will be applied
 when dynamic introduction of fields / objects happens.
+
+IMPORTANT: Dynamic field mappings are only added when a field contains
+a concrete value -- not `null` or an empty array. This means that if the `null_value` option 
+is used in a `dynamic_template`, it will only be applied after the first document 
+with a concrete value for the field has been indexed.
 
 For example, we might want to have all fields to be stored by default,
 or all `string` fields to be stored, or have `string` fields to always

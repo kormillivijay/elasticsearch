@@ -24,6 +24,7 @@ import com.carrotsearch.hppc.ObjectObjectOpenHashMap;
 import com.carrotsearch.randomizedtesting.generators.RandomInts;
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.document.Document;
+import org.apache.lucene.document.DoubleField;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.*;
@@ -34,17 +35,24 @@ import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.LuceneTestCase;
 import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.lucene.search.NotFilter;
+import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.lucene.search.XFilteredQuery;
+import org.elasticsearch.common.lucene.search.function.FieldValueFactorFunction;
+import org.elasticsearch.common.lucene.search.function.FunctionScoreQuery;
 import org.elasticsearch.index.engine.Engine;
+import org.elasticsearch.index.cache.fixedbitset.FixedBitSetFilter;
+import org.elasticsearch.index.fielddata.IndexNumericFieldData;
 import org.elasticsearch.index.fielddata.plain.ParentChildIndexFieldData;
+import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.Uid;
+import org.elasticsearch.index.mapper.internal.IdFieldMapper;
 import org.elasticsearch.index.mapper.internal.ParentFieldMapper;
 import org.elasticsearch.index.mapper.internal.TypeFieldMapper;
 import org.elasticsearch.index.mapper.internal.UidFieldMapper;
 import org.elasticsearch.index.search.nested.NonNestedDocsFilter;
 import org.elasticsearch.search.internal.ContextIndexSearcher;
 import org.elasticsearch.search.internal.SearchContext;
-import org.elasticsearch.test.ElasticsearchLuceneTestCase;
+import org.elasticsearch.test.TestSearchContext;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -55,11 +63,10 @@ import java.util.NavigableMap;
 import java.util.Random;
 import java.util.TreeMap;
 
-import static org.elasticsearch.index.search.child.ChildrenConstantScoreQueryTests.assertBitSet;
-import static org.elasticsearch.index.search.child.ChildrenConstantScoreQueryTests.createSearchContext;
-import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
-public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
+public class ChildrenQueryTests extends AbstractChildTests {
 
     @BeforeClass
     public static void before() throws IOException {
@@ -80,11 +87,11 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
         ScoreType scoreType = ScoreType.values()[random().nextInt(ScoreType.values().length)];
         ParentFieldMapper parentFieldMapper = SearchContext.current().mapperService().documentMapper("child").parentFieldMapper();
         ParentChildIndexFieldData parentChildIndexFieldData = SearchContext.current().fieldData().getForField(parentFieldMapper);
-        Filter parentFilter = new TermFilter(new Term(TypeFieldMapper.NAME, "parent"));
+        FixedBitSetFilter parentFilter = wrap(new TermFilter(new Term(TypeFieldMapper.NAME, "parent")));
         int minChildren = random().nextInt(10);
         int maxChildren = scaledRandomIntBetween(minChildren, 10);
         Query query = new ChildrenQuery(parentChildIndexFieldData, "parent", "child", parentFilter, childQuery, scoreType, minChildren,
-                maxChildren, 12, NonNestedDocsFilter.INSTANCE);
+                maxChildren, 12, wrap(NonNestedDocsFilter.INSTANCE));
         QueryUtils.check(query);
     }
 
@@ -131,7 +138,7 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
                 String childValue = childValues[random().nextInt(childValues.length)];
 
                 document = new Document();
-                document.add(new StringField(UidFieldMapper.NAME, Uid.createUid("child", Integer.toString(childDocId)), Field.Store.NO));
+                document.add(new StringField(UidFieldMapper.NAME, Uid.createUid("child", Integer.toString(childDocId++)), Field.Store.NO));
                 document.add(new StringField(TypeFieldMapper.NAME, "child", Field.Store.NO));
                 document.add(new StringField(ParentFieldMapper.NAME, Uid.createUid("parent", parent), Field.Store.NO));
                 document.add(new StringField("field1", childValue, Field.Store.NO));
@@ -171,19 +178,10 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
 
         ParentFieldMapper parentFieldMapper = SearchContext.current().mapperService().documentMapper("child").parentFieldMapper();
         ParentChildIndexFieldData parentChildIndexFieldData = SearchContext.current().fieldData().getForField(parentFieldMapper);
-        Filter rawParentFilter = new TermFilter(new Term(TypeFieldMapper.NAME, "parent"));
+        FixedBitSetFilter parentFilter = wrap(new TermFilter(new Term(TypeFieldMapper.NAME, "parent")));
         Filter rawFilterMe = new NotFilter(new TermFilter(new Term("filter", "me")));
         int max = numUniqueChildValues / 4;
         for (int i = 0; i < max; i++) {
-            // Randomly pick a cached version: there is specific logic inside ChildrenQuery that deals with the fact
-            // that deletes are applied at the top level when filters are cached.
-            Filter parentFilter;
-            if (random().nextBoolean()) {
-                parentFilter = SearchContext.current().filterCache().cache(rawParentFilter);
-            } else {
-                parentFilter = rawParentFilter;
-            }
-
             // Using this in FQ, will invoke / test the Scorer#advance(..) and also let the Weight#scorer not get live docs as acceptedDocs
             Filter filterMe;
             if (random().nextBoolean()) {
@@ -224,7 +222,7 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
             Query childQuery = new ConstantScoreQuery(new TermQuery(new Term("field1", childValue)));
             int shortCircuitParentDocSet = random().nextInt(numParentDocs);
             ScoreType scoreType = ScoreType.values()[random().nextInt(ScoreType.values().length)];
-            Filter nonNestedDocsFilter = random().nextBoolean() ? NonNestedDocsFilter.INSTANCE : null;
+            FixedBitSetFilter nonNestedDocsFilter = random().nextBoolean() ? wrap(NonNestedDocsFilter.INSTANCE) : null;
 
             // leave min/max set to 0 half the time
             int minChildren = random().nextInt(2) * scaledRandomIntBetween(0, 110);
@@ -276,16 +274,140 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
         directory.close();
     }
 
-    static void assertTopDocs(TopDocs actual, TopDocs expected) {
-        assertThat("actual.totalHits != expected.totalHits", actual.totalHits, equalTo(expected.totalHits));
-        assertThat("actual.getMaxScore() != expected.getMaxScore()", actual.getMaxScore(), equalTo(expected.getMaxScore()));
-        assertThat("actual.scoreDocs.length != expected.scoreDocs.length", actual.scoreDocs.length, equalTo(actual.scoreDocs.length));
-        for (int i = 0; i < actual.scoreDocs.length; i++) {
-            ScoreDoc actualHit = actual.scoreDocs[i];
-            ScoreDoc expectedHit = expected.scoreDocs[i];
-            assertThat("actualHit.doc != expectedHit.doc", actualHit.doc, equalTo(expectedHit.doc));
-            assertThat("actualHit.score != expectedHit.score", actualHit.score, equalTo(expectedHit.score));
-        }
+    @Test
+    public void testMinScoreMode() throws IOException {
+        assertScoreType(ScoreType.MIN);
     }
 
+    @Test
+    public void testMaxScoreMode() throws IOException {
+        assertScoreType(ScoreType.MAX);
+    }
+
+    @Test
+    public void testAvgScoreMode() throws IOException {
+        assertScoreType(ScoreType.AVG);
+    }
+
+    @Test
+    public void testSumScoreMode() throws IOException {
+        assertScoreType(ScoreType.SUM);
+    }
+
+    /**
+     * Assert that the {@code scoreType} operates as expected and parents are found in the expected order.
+     * <p />
+     * This will use the test index's parent/child types to create parents with multiple children. Each child will have
+     * a randomly generated scored stored in {@link #CHILD_SCORE_NAME}, which is used to score based on the
+     * {@code scoreType} by using a {@link MockScorer} to determine the expected scores.
+     * @param scoreType The score type to use within the query to score parents relative to their children.
+     * @throws IOException if any unexpected error occurs
+     */
+    private void assertScoreType(ScoreType scoreType) throws IOException {
+        SearchContext context = SearchContext.current();
+        Directory directory = newDirectory();
+        IndexWriter writer = new IndexWriter(directory, newIndexWriterConfig(new MockAnalyzer(random())));
+
+        // calculates the expected score per parent
+        MockScorer scorer = new MockScorer(scoreType);
+        scorer.scores = new FloatArrayList(10);
+
+        // number of parents to generate
+        int parentDocs = scaledRandomIntBetween(2, 10);
+        // unique child ID
+        int childDocId = 0;
+
+        // Parent ID to expected score
+        Map<String, Float> parentScores = new TreeMap<>();
+
+        // Add a few random parents to ensure that the children's score is appropriately taken into account
+        for (int parentDocId = 0; parentDocId < parentDocs; ++parentDocId) {
+            String parent = Integer.toString(parentDocId);
+
+            // Create the parent
+            Document parentDocument = new Document();
+
+            parentDocument.add(new StringField(UidFieldMapper.NAME, Uid.createUid("parent", parent), Field.Store.YES));
+            parentDocument.add(new StringField(IdFieldMapper.NAME, parent, Field.Store.YES));
+            parentDocument.add(new StringField(TypeFieldMapper.NAME, "parent", Field.Store.NO));
+
+            // add the parent to the index
+            writer.addDocument(parentDocument);
+
+            int numChildDocs = scaledRandomIntBetween(1, 10);
+
+            // forget any parent's previous scores
+            scorer.scores.clear();
+
+            // associate children with the parent
+            for (int i = 0; i < numChildDocs; ++i) {
+                int childScore = random().nextInt(128);
+
+                Document childDocument = new Document();
+
+                childDocument.add(new StringField(UidFieldMapper.NAME, Uid.createUid("child", Integer.toString(childDocId++)), Field.Store.NO));
+                childDocument.add(new StringField(TypeFieldMapper.NAME, "child", Field.Store.NO));
+                // parent association:
+                childDocument.add(new StringField(ParentFieldMapper.NAME, Uid.createUid("parent", parent), Field.Store.NO));
+                childDocument.add(new DoubleField(CHILD_SCORE_NAME, childScore, Field.Store.NO));
+
+                // remember the score to be calculated
+                scorer.scores.add(childScore);
+
+                // add the associated child to the index
+                writer.addDocument(childDocument);
+            }
+
+            // this score that should be returned for this parent
+            parentScores.put(parent, scorer.score());
+        }
+
+        writer.commit();
+
+        IndexReader reader = DirectoryReader.open(writer, true);
+        IndexSearcher searcher = new IndexSearcher(reader);
+
+        // setup to read the parent/child map
+        Engine.SimpleSearcher engineSearcher = new Engine.SimpleSearcher(ChildrenQueryTests.class.getSimpleName(), searcher);
+        ((TestSearchContext)context).setSearcher(new ContextIndexSearcher(context, engineSearcher));
+        ParentFieldMapper parentFieldMapper = context.mapperService().documentMapper("child").parentFieldMapper();
+        ParentChildIndexFieldData parentChildIndexFieldData = context.fieldData().getForField(parentFieldMapper);
+        FixedBitSetFilter parentFilter = wrap(new TermFilter(new Term(TypeFieldMapper.NAME, "parent")));
+
+        // child query that returns the score as the value of "childScore" for each child document,
+        //  with the parent's score determined by the score type
+        FieldMapper fieldMapper = context.mapperService().smartNameFieldMapper(CHILD_SCORE_NAME);
+        IndexNumericFieldData fieldData = context.fieldData().getForField(fieldMapper);
+        FieldValueFactorFunction fieldScore = new FieldValueFactorFunction(CHILD_SCORE_NAME, 1, FieldValueFactorFunction.Modifier.NONE, fieldData);
+        Query childQuery = new FunctionScoreQuery(new FilteredQuery(Queries.newMatchAllQuery(), new TermFilter(new Term(TypeFieldMapper.NAME, "child"))), fieldScore);
+
+        // Perform the search for the documents using the selected score type
+        TopDocs docs =
+                searcher.search(
+                    new ChildrenQuery(parentChildIndexFieldData, "parent", "child", parentFilter, childQuery, scoreType, 0, 0, parentDocs, null),
+                    parentDocs);
+
+        assertThat("Expected all parents", docs.totalHits, is(parentDocs));
+
+        // score should be descending (just a sanity check)
+        float topScore = docs.scoreDocs[0].score;
+
+        // ensure each score is returned as expected
+        for (int i = 0; i < parentDocs; ++i) {
+            ScoreDoc scoreDoc = docs.scoreDocs[i];
+            // get the ID from the document to get its expected score; remove it so we cannot double-count it
+            float score = parentScores.remove(reader.document(scoreDoc.doc).get(IdFieldMapper.NAME));
+
+            // expect exact match
+            assertThat("Unexpected score", scoreDoc.score, is(score));
+            assertThat("Not descending", score, lessThanOrEqualTo(topScore));
+
+            // it had better keep descending
+            topScore = score;
+        }
+
+        reader.close();
+        writer.close();
+        directory.close();
+    }
 }

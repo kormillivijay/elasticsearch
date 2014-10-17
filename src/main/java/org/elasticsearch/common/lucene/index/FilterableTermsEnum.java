@@ -65,15 +65,17 @@ public class FilterableTermsEnum extends TermsEnum {
     protected final int docsEnumFlag;
     protected int numDocs;
 
-    public FilterableTermsEnum(IndexReader reader, String field, int docsEnumFlag, @Nullable Filter filter) throws IOException {
+    public FilterableTermsEnum(IndexReader reader, String field, int docsEnumFlag, @Nullable final Filter filter) throws IOException {
         if ((docsEnumFlag != DocsEnum.FLAG_FREQS) && (docsEnumFlag != DocsEnum.FLAG_NONE)) {
             throw new ElasticsearchIllegalArgumentException("invalid docsEnumFlag of " + docsEnumFlag);
         }
         this.docsEnumFlag = docsEnumFlag;
         if (filter == null) {
-            numDocs = reader.numDocs();
+            // Important - need to use the doc count that includes deleted docs
+            // or we have this issue: https://github.com/elasticsearch/elasticsearch/issues/7951
+            numDocs = reader.maxDoc();
         }
-
+        ApplyAcceptedDocsFilter acceptedDocsFilter = filter == null ? null : new ApplyAcceptedDocsFilter(filter);
         List<AtomicReaderContext> leaves = reader.leaves();
         List<Holder> enums = Lists.newArrayListWithExpectedSize(leaves.size());
         for (AtomicReaderContext context : leaves) {
@@ -86,13 +88,12 @@ public class FilterableTermsEnum extends TermsEnum {
                 continue;
             }
             Bits bits = null;
-            if (filter != null) {
-                if (filter == Queries.MATCH_ALL_FILTER) {
+            if (acceptedDocsFilter != null) {
+                if (acceptedDocsFilter.filter() == Queries.MATCH_ALL_FILTER) {
                     bits = context.reader().getLiveDocs();
                 } else {
                     // we want to force apply deleted docs
-                    filter = new ApplyAcceptedDocsFilter(filter);
-                    DocIdSet docIdSet = filter.getDocIdSet(context, context.reader().getLiveDocs());
+                    DocIdSet docIdSet = acceptedDocsFilter.getDocIdSet(context, context.reader().getLiveDocs());
                     if (DocIdSets.isEmpty(docIdSet)) {
                         // fully filtered, none matching, no need to iterate on this
                         continue;

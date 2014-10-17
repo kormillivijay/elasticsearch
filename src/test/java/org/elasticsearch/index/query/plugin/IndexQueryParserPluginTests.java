@@ -19,8 +19,9 @@
 
 package org.elasticsearch.index.query.plugin;
 
-import org.elasticsearch.cache.recycler.CacheRecyclerModule;
+import org.elasticsearch.Version;
 import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.inject.AbstractModule;
 import org.elasticsearch.common.inject.Injector;
 import org.elasticsearch.common.inject.ModulesBuilder;
@@ -39,10 +40,8 @@ import org.elasticsearch.index.query.IndexQueryParserService;
 import org.elasticsearch.index.query.functionscore.FunctionScoreModule;
 import org.elasticsearch.index.settings.IndexSettingsModule;
 import org.elasticsearch.index.similarity.SimilarityModule;
-import org.elasticsearch.indices.fielddata.breaker.NoneCircuitBreakerService;
-import org.elasticsearch.indices.query.IndicesQueriesModule;
-import org.elasticsearch.script.ScriptModule;
-import org.elasticsearch.indices.fielddata.breaker.CircuitBreakerService;
+import org.elasticsearch.indices.breaker.CircuitBreakerService;
+import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.indices.query.IndicesQueriesModule;
 import org.elasticsearch.script.ScriptModule;
 import org.elasticsearch.test.ElasticsearchTestCase;
@@ -58,8 +57,8 @@ import static org.hamcrest.Matchers.equalTo;
 public class IndexQueryParserPluginTests extends ElasticsearchTestCase {
 
     @Test
-    public void testCustomInjection() {
-        Settings settings = ImmutableSettings.builder().put("name", "testCustomInjection").build();
+    public void testCustomInjection() throws InterruptedException {
+        Settings settings = ImmutableSettings.builder().put("name", "testCustomInjection").put(IndexMetaData.SETTING_VERSION_CREATED, Version.CURRENT).build();
 
         IndexQueryParserModule queryParserModule = new IndexQueryParserModule(settings);
         queryParserModule.addProcessor(new IndexQueryParserModule.QueryParsersProcessor() {
@@ -77,7 +76,6 @@ public class IndexQueryParserPluginTests extends ElasticsearchTestCase {
         Index index = new Index("test");
         Injector injector = new ModulesBuilder().add(
                 new SettingsModule(settings),
-                new CacheRecyclerModule(settings),
                 new ThreadPoolModule(settings),
                 new IndicesQueriesModule(),
                 new ScriptModule(settings),
@@ -108,6 +106,6 @@ public class IndexQueryParserPluginTests extends ElasticsearchTestCase {
         PluginJsonFilterParser myJsonFilterParser = (PluginJsonFilterParser) indexQueryParserService.filterParser("my");
         assertThat(myJsonFilterParser.names()[0], equalTo("my"));
 
-        injector.getInstance(ThreadPool.class).shutdownNow();
+        terminate(injector.getInstance(ThreadPool.class));
     }
 }

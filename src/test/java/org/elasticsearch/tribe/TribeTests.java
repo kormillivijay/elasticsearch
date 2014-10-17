@@ -19,7 +19,6 @@
 
 package org.elasticsearch.tribe;
 
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableMap;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthStatus;
 import org.elasticsearch.client.Client;
@@ -46,12 +45,15 @@ import java.util.Map;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertHitCount;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * Note, when talking to tribe client, no need to set the local flag on master read operations, it
  * does it by default.
  */
 public class TribeTests extends ElasticsearchIntegrationTest {
+
+    public static final String SECOND_CLUSTER_NODE_PREFIX = "node_tribe2";
 
     private static InternalTestCluster cluster2;
 
@@ -62,7 +64,7 @@ public class TribeTests extends ElasticsearchIntegrationTest {
     public static void setupSecondCluster() throws Exception {
         ElasticsearchIntegrationTest.beforeClass();
         // create another cluster
-        cluster2 = new InternalTestCluster(randomLong(), 2, 2, Strings.randomBase64UUID(getRandom()), 0, false);
+        cluster2 = new InternalTestCluster(randomLong(), 2, 2, Strings.randomBase64UUID(getRandom()), 0, false, CHILD_JVM_ID, SECOND_CLUSTER_NODE_PREFIX);
         cluster2.beforeTest(getRandom(), 0.1);
         cluster2.ensureAtLeastNumDataNodes(2);
     }
@@ -110,6 +112,7 @@ public class TribeTests extends ElasticsearchIntegrationTest {
                 .put(tribe1Defaults.build())
                 .put(tribe2Defaults.build())
                 .put(internalCluster().getDefaultSettings())
+                .put("node.name", "tribe_node") // make sure we can identify threads from this node
                 .build();
 
         tribeNode = NodeBuilder.nodeBuilder()
@@ -267,12 +270,12 @@ public class TribeTests extends ElasticsearchIntegrationTest {
         logger.info("verify they are there");
         assertHitCount(tribeClient.prepareCount().get(), 2l);
         assertHitCount(tribeClient.prepareSearch().get(), 2l);
-        awaitBusy(new Predicate<Object>() {
+        assertBusy(new Runnable() {
             @Override
-            public boolean apply(Object o) {
+            public void run() {
                 ClusterState tribeState = tribeNode.client().admin().cluster().prepareState().get().getState();
-                return tribeState.getMetaData().index("test1").mapping("type1") != null &&
-                        tribeState.getMetaData().index("test2").mapping("type2") != null;
+                assertThat(tribeState.getMetaData().index("test1").mapping("type1"), notNullValue());
+                assertThat(tribeState.getMetaData().index("test2").mapping("type1"), notNullValue());
             }
         });
 
@@ -286,12 +289,14 @@ public class TribeTests extends ElasticsearchIntegrationTest {
         logger.info("verify they are there");
         assertHitCount(tribeClient.prepareCount().get(), 4l);
         assertHitCount(tribeClient.prepareSearch().get(), 4l);
-        awaitBusy(new Predicate<Object>() {
+        assertBusy(new Runnable() {
             @Override
-            public boolean apply(Object o) {
+            public void run() {
                 ClusterState tribeState = tribeNode.client().admin().cluster().prepareState().get().getState();
-                return tribeState.getMetaData().index("test1").mapping("type1") != null && tribeState.getMetaData().index("test1").mapping("type2") != null &&
-                        tribeState.getMetaData().index("test2").mapping("type1") != null && tribeState.getMetaData().index("test2").mapping("type2") != null;
+                assertThat(tribeState.getMetaData().index("test1").mapping("type1"), notNullValue());
+                assertThat(tribeState.getMetaData().index("test1").mapping("type2"), notNullValue());
+                assertThat(tribeState.getMetaData().index("test2").mapping("type1"), notNullValue());
+                assertThat(tribeState.getMetaData().index("test2").mapping("type2"), notNullValue());
             }
         });
 
@@ -305,12 +310,14 @@ public class TribeTests extends ElasticsearchIntegrationTest {
 
         logger.info("delete an index, and make sure its reflected");
         cluster2.client().admin().indices().prepareDelete("test2").get();
-        awaitBusy(new Predicate<Object>() {
+        assertBusy(new Runnable() {
             @Override
-            public boolean apply(Object o) {
+            public void run() {
                 ClusterState tribeState = tribeNode.client().admin().cluster().prepareState().get().getState();
-                return tribeState.getMetaData().hasIndex("test1") && !tribeState.getMetaData().hasIndex("test2") &&
-                        tribeState.getRoutingTable().hasIndex("test1") && !tribeState.getRoutingTable().hasIndex("test2");
+                assertTrue(tribeState.getMetaData().hasIndex("test1"));
+                assertFalse(tribeState.getMetaData().hasIndex("test2"));
+                assertTrue(tribeState.getRoutingTable().hasIndex("test1"));
+                assertFalse(tribeState.getRoutingTable().hasIndex("test2"));
             }
         });
 
@@ -320,30 +327,25 @@ public class TribeTests extends ElasticsearchIntegrationTest {
     }
 
     private void awaitIndicesInClusterState(final String... indices) throws Exception {
-        awaitBusy(new Predicate<Object>() {
+        assertBusy(new Runnable() {
             @Override
-            public boolean apply(Object o) {
+            public void run() {
                 ClusterState tribeState = tribeNode.client().admin().cluster().prepareState().get().getState();
                 for (String index : indices) {
-                    if (!tribeState.getMetaData().hasIndex(index)) {
-                        return false;
-                    }
-                    if (!tribeState.getRoutingTable().hasIndex(index)) {
-                        return false;
-                    }
+                    assertTrue(tribeState.getMetaData().hasIndex(index));
+                    assertTrue(tribeState.getRoutingTable().hasIndex(index));
                 }
-                return true;
             }
         });
     }
 
     private void awaitSameNodeCounts() throws Exception {
-        awaitBusy(new Predicate<Object>() {
+        assertBusy(new Runnable() {
             @Override
-            public boolean apply(Object o) {
+            public void run() {
                 DiscoveryNodes tribeNodes = tribeNode.client().admin().cluster().prepareState().get().getState().getNodes();
-                return countDataNodesForTribe("t1", tribeNodes) == internalCluster().client().admin().cluster().prepareState().get().getState().getNodes().dataNodes().size()
-                        && countDataNodesForTribe("t2", tribeNodes) == cluster2.client().admin().cluster().prepareState().get().getState().getNodes().dataNodes().size();
+                assertThat(countDataNodesForTribe("t1", tribeNodes), equalTo(internalCluster().client().admin().cluster().prepareState().get().getState().getNodes().dataNodes().size()));
+                assertThat(countDataNodesForTribe("t2", tribeNodes), equalTo(cluster2.client().admin().cluster().prepareState().get().getState().getNodes().dataNodes().size()));
             }
         });
     }

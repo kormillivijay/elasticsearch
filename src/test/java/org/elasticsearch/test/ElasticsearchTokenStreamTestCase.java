@@ -25,8 +25,11 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope;
 import com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope.Scope;
 import com.carrotsearch.randomizedtesting.annotations.TimeoutSuite;
 import org.apache.lucene.analysis.BaseTokenStreamTestCase;
+import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.TimeUnits;
 import org.elasticsearch.Version;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
+import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.test.junit.listeners.ReproduceInfoPrinter;
 
 @Listeners({
@@ -35,7 +38,7 @@ import org.elasticsearch.test.junit.listeners.ReproduceInfoPrinter;
 @ThreadLeakFilters(defaultFilters = true, filters = {ElasticsearchThreadFilter.class})
 @ThreadLeakScope(Scope.NONE)
 @TimeoutSuite(millis = TimeUnits.HOUR)
-
+@LuceneTestCase.SuppressSysoutChecks(bugUrl = "we log a lot on purpose")
 /**
  * Basic test case for token streams. the assertion methods in this class will
  * run basic checks to enforce correct behavior of the token streams.
@@ -44,5 +47,9 @@ public abstract class ElasticsearchTokenStreamTestCase extends BaseTokenStreamTe
 
     public static Version randomVersion() {
         return ElasticsearchTestCase.randomVersion(random());
+    }
+
+    public ImmutableSettings.Builder newAnalysisSettingsBuilder() {
+        return ImmutableSettings.builder().put(IndexMetaData.SETTING_VERSION_CREATED, Version.CURRENT);
     }
 }
